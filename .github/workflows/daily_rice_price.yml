@@ -17,9 +17,9 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Playwright
+      - name: Install Playwright & curl_cffi
         run: |
-          pip install playwright==1.48.0
+          pip install playwright==1.48.0 curl_cffi
           playwright install --with-deps chromium
 
       - name: Check prices and send email
@@ -27,5 +27,5 @@ jobs:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          POSTAL_CODE: ${{ secrets.POSTAL_CODE || 'M5V2T6' }}
+          POSTAL_CODE: ${{ secrets.POSTAL_CODE || 'K2J6C8' }}
         run: python check_prices.py
