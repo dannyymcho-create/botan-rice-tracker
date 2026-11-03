@@ -17,9 +17,9 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Playwright & curl_cffi
+      - name: Install Playwright & Search packages
         run: |
-          pip install playwright==1.48.0 curl_cffi
+          pip install playwright==1.48.0 curl_cffi duckduckgo-search
           playwright install --with-deps chromium
 
       - name: Check prices and send email
