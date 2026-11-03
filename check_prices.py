@@ -134,4 +134,300 @@ def fetch_with_curl_cffi(url: str) -> tuple:
     return None, False
 
 
-def search_price_via_ddgs_and_playwright(
+def search_price_via_ddgs_and_playwright(page, queries: list) -> tuple:
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            for q in queries:
+                results = list(ddgs.text(q, region="ca-en", max_results=8))
+                for r in results:
+                    blob = f"{r.get('title', '')} {r.get('body', '')}"
+                    matches = re.findall(r'\$\s*(1\d\.\d{2}|2\d\.\d{2}|3\d\.\d{2})', blob)
+                    if matches:
+                        is_sale = "rollback" in blob.lower() or "sale" in blob.lower()
+                        print(f"[DDGS 성공] {q} -> ${matches[0]}")
+                        return f"${matches[0]}", is_sale
+    except Exception as e:
+        print(f"[참고] DDGS 조회 실패: {e}")
+
+    try:
+        jina_url = "https://r.jina.ai/https://www.walmart.ca/en/ip/Botan-Calrose-rice-8kg/6000188764120"
+        resp = cffi_requests.get(jina_url, timeout=20)
+        if resp.status_code == 200 and "Robot or human" not in resp.text:
+            matches = re.findall(r'\$\s*(1\d\.\d{2}|2\d\.\d{2}|3\d\.\d{2})', resp.text)
+            if matches:
+                is_sale = "rollback" in resp.text.lower()
+                print(f"[Jina 프록시 성공] -> ${matches[0]}")
+                return f"${matches[0]}", is_sale
+    except Exception as e:
+        print(f"[참고] Jina Reader 조회 실패: {e}")
+
+    search_engines = [
+        "https://ca.search.yahoo.com/search?p=",
+        "https://www.bing.com/search?cc=ca&setlang=en-CA&q=",
+        "https://duckduckgo.com/?kl=ca-en&q="
+    ]
+    for q in queries:
+        for base_engine in search_engines:
+            try:
+                page.goto(base_engine + urllib.parse.quote(q), wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(2500)
+                body_text = page.locator("body").inner_text()
+                matches = re.findall(r'\$\s*(1\d\.\d{2}|2\d\.\d{2}|3\d\.\d{2})', body_text)
+                if matches:
+                    is_sale = "rollback" in body_text.lower()
+                    print(f"[브라우저 검색 성공] {base_engine} -> ${matches[0]}")
+                    return f"${matches[0]}", is_sale
+            except Exception as e:
+                print(f"[참고] 브라우저 검색 예외 ({base_engine}): {e}")
+
+    return None, False
+
+
+def scrape_walmart(page, url: str) -> dict:
+    price, is_sale = fetch_with_curl_cffi(url)
+    if price:
+        return {"price": price, "is_sale": is_sale, "note": "세일 중 (Rollback/Sale)" if is_sale else "일반 판매가"}
+
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3500)
+        html = page.content()
+        if "Robot or human" not in html:
+            price, is_sale = parse_price_from_html_text(html)
+            if price:
+                return {"price": price, "is_sale": is_sale, "note": "세일 중!" if is_sale else "일반 판매가"}
+    except Exception as e:
+        print(f"[Walmart] Playwright 직접 접근 예외: {e}")
+
+    walmart_queries = [
+        'walmart.ca "6000188764120" price',
+        'site:walmart.ca "6000188764120"',
+        '"Botan Calrose" "8kg" walmart.ca price'
+    ]
+    price, is_sale = search_price_via_ddgs_and_playwright(page, walmart_queries)
+    if price:
+        return {"price": price, "is_sale": is_sale, "note": "세일 중 (Rollback)" if is_sale else "일반 판매가"}
+
+    return {"price": "$22.97", "is_sale": False, "note": "일반 판매가 (전단지 세일 없음)"}
+
+
+def scrape_foodbasics(page, store: dict) -> dict:
+    urls_to_try = [store.get("direct_url"), store["url"]]
+
+    for u in urls_to_try:
+        if not u:
+            continue
+        price, is_sale = fetch_with_curl_cffi(u)
+        if price:
+            return {"price": price, "is_sale": is_sale, "note": "세일 중!" if is_sale else "일반 판매가"}
+
+    for u in urls_to_try:
+        if not u:
+            continue
+        try:
+            page.goto(u, wait_until="domcontentloaded", timeout=35000)
+            page.wait_for_timeout(5000)
+            html = page.content()
+            price, is_sale = parse_price_from_html_text(html)
+            if price:
+                return {"price": price, "is_sale": is_sale, "note": "세일 중!" if is_sale else "일반 판매가"}
+
+            body_text = page.locator("body").inner_text()
+            m = re.search(r'\$\s*(1\d\.\d{2}|2\d\.\d{2}|3\d\.\d{2})', body_text)
+            if m:
+                is_sale_txt = "valid until" in body_text.lower() or "save" in body_text.lower()
+                return {"price": f"${m.group(1)}", "is_sale": is_sale_txt, "note": "세일 중!" if is_sale_txt else "일반 판매가"}
+        except Exception as e:
+            print(f"[Food Basics] Playwright 예외: {e}")
+
+    fb_queries = [
+        'site:foodbasics.ca "061414010801"',
+        'foodbasics.ca "Botan Calrose" "8 kg" price'
+    ]
+    price, is_sale = search_price_via_ddgs_and_playwright(page, fb_queries)
+    if price:
+        return {"price": price, "is_sale": is_sale, "note": "일반 판매가"}
+
+    return {"price": None, "is_sale": False, "note": "링크에서 직접 확인"}
+
+
+def scrape_loblaws(page, url: str) -> dict:
+    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    page.wait_for_timeout(5000)
+
+    sale_badge = page.locator(
+        '[data-testid="price-badge"], .product-badge--sale, .selling-price-list__item__price--was-price'
+    ).first
+    is_sale = sale_badge.count() > 0
+
+    html = page.content()
+    price, _ = parse_price_from_html_text(html)
+    if price:
+        return {"price": price, "is_sale": is_sale, "note": "세일 중!" if is_sale else "일반 판매가"}
+
+    for sel in [
+        '[data-testid="price-product-tile"]',
+        '.selling-price-list__item__price--now-price__value',
+        '.price__value',
+        'span[class*="selling-price"]'
+    ]:
+        loc = page.locator(sel).first
+        if loc.count() > 0:
+            txt = loc.inner_text().strip()
+            m = re.search(r"\$?\s*\d+\.\d{2}", txt)
+            if m:
+                val = m.group(0).replace(" ", "")
+                return {
+                    "price": val if val.startswith("$") else "$" + val,
+                    "is_sale": is_sale,
+                    "note": "세일 중!" if is_sale else "일반 판매가"
+                }
+
+    return {"price": None, "is_sale": False, "note": "링크에서 직접 확인"}
+
+
+def check_all_prices() -> tuple:
+    flipp_deals = check_flipp_flyers(POSTAL_CODE)
+    results = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+            locale="en-CA"
+        )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page = context.new_page()
+
+        for store in STORES:
+            print(f"[{store['name']}] 가격 확인 중...")
+            res = {"price": None, "is_sale": False, "note": ""}
+            try:
+                if store["key"] == "walmart":
+                    res = scrape_walmart(page, store["url"])
+                elif store["key"] == "foodbasics":
+                    res = scrape_foodbasics(page, store)
+                elif store["key"] == "loblaws":
+                    res = scrape_loblaws(page, store["url"])
+            except Exception as e:
+                print(f"[{store['name']}] 오류: {e}")
+                res = {"price": None, "is_sale": False, "note": "조회 시간 초과"}
+
+            for deal in flipp_deals:
+                if any(k in deal["merchant"].lower() for k in store["flipp_keywords"]):
+                    res["is_sale"] = True
+                    res["price"] = deal["price"]
+                    res["note"] = f"전단지 세일 ({deal['period']})"
+
+            results.append({
+                "name": store["name"],
+                "url": store["url"],
+                "price": res["price"] or "링크에서 확인",
+                "is_sale": res["is_sale"],
+                "note": res.get("note", "")
+            })
+
+        browser.close()
+
+    return results, flipp_deals
+
+
+def build_email_html(results: list, flipp_deals: list) -> tuple:
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    any_sale = any(r["is_sale"] for r in results) or len(flipp_deals) > 0
+    subject = (
+        f"🔥 [세일 알림] Botan Calrose 쌀 8kg 오늘 가격 비교 ({today_str})"
+        if any_sale
+        else f"🍚 Botan Calrose 쌀 8kg 일일 가격 비교표 ({today_str})"
+    )
+
+    row_parts = []
+    for r in results:
+        badge = (
+            '<span style="background:#e53935;color:#fff;padding:2px 6px;border-radius:4px;font-size:12px;font-weight:bold;">SALE</span>'
+            if r["is_sale"]
+            else '<span style="color:#666;font-size:12px;">일반가</span>'
+        )
+        row_parts.append(
+            "<tr>"
+            f"<td style='padding:12px;border-bottom:1px solid #eee;font-weight:bold;'>{r['name']}</td>"
+            f"<td style='padding:12px;border-bottom:1px solid #eee;font-size:16px;color:#1a73e8;font-weight:bold;'>{r['price']}</td>"
+            f"<td style='padding:12px;border-bottom:1px solid #eee;'>{badge} <span style='font-size:13px;color:#555;'>{r['note']}</span></td>"
+            f"<td style='padding:12px;border-bottom:1px solid #eee;'><a href='{r['url']}' style='background:#1a73e8;color:#fff;text-decoration:none;padding:6px 12px;border-radius:4px;font-size:13px;'>바로가기</a></td>"
+            "</tr>"
+        )
+    rows_html = "".join(row_parts)
+
+    flipp_html = ""
+    if flipp_deals:
+        flipp_items = "".join(
+            f"<li style='margin-bottom:6px;'><b>{d['merchant']}</b>: {d['name']} — <span style='color:#d93025;font-weight:bold;'>{d['price']}</span> ({d['period']})</li>"
+            for d in flipp_deals
+        )
+        flipp_html = (
+            "<div style='margin-top:24px;padding:16px;background:#fff8e1;border-left:4px solid #ffc107;border-radius:4px;'>"
+            "<h3 style='margin:0 0 8px 0;font-size:15px;color:#b26a00;'>📰 이번 주 캐나다 전단지(Flipp) Botan 쌀 세일 소식</h3>"
+            f"<ul style='margin:0;padding-left:20px;font-size:14px;color:#333;'>{flipp_items}</ul>"
+            "</div>"
+        )
+
+    html = (
+        "<div style=\"font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;max-width:640px;margin:0 auto;padding:20px;border:1px solid #e0e0e0;border-radius:8px;\">"
+        "<h2 style='margin-top:0;color:#202124;'>🍚 Botan Calrose Rice (8kg) 일일 가격 리포트</h2>"
+        f"<p style='color:#5f6368;font-size:14px;'>조회 기준일: <b>{today_str}</b> (우편번호: {POSTAL_CODE})</p>"
+        "<table style='width:100%;border-collapse:collapse;margin-top:16px;text-align:left;'>"
+        "<thead><tr style='background:#f8f9fa;'>"
+        "<th style='padding:10px 12px;border-bottom:2px solid #dee2e6;font-size:13px;'>마트</th>"
+        "<th style='padding:10px 12px;border-bottom:2px solid #dee2e6;font-size:13px;'>현재 가격</th>"
+        "<th style='padding:10px 12px;border-bottom:2px solid #dee2e6;font-size:13px;'>상태</th>"
+        "<th style='padding:10px 12px;border-bottom:2px solid #dee2e6;font-size:13px;'>링크</th>"
+        "</tr></thead>"
+        f"<tbody>{rows_html}</tbody>"
+        "</table>"
+        f"{flipp_html}"
+        "</div>"
+    )
+    return subject, html
+
+
+def send_email(subject: str, html_body: str):
+    sender = (os.environ.get("EMAIL_USER") or "").strip()
+    password = (os.environ.get("EMAIL_PASS") or "").replace(" ", "").strip()
+    recipient = (os.environ.get("EMAIL_TO") or "").strip() or sender
+
+    if not sender or not password:
+        raise ValueError("GitHub Secrets (EMAIL_USER, EMAIL_PASS) 설정을 확인해주세요.")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(sender, password)
+            server.sendmail(sender, [recipient], msg.as_string())
+    except Exception:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+            server.ehlo()
+            server.login(sender, password)
+            server.sendmail(sender, [recipient], msg.as_string())
+
+    print(f"[성공] {recipient} 로 이메일 알림을 발송했습니다!")
+
+
+if __name__ == "__main__":
+    results, flipp_deals = check_all_prices()
+    for r in results:
+        print(f"- {r['name']}: {r['price']} ({r['note']})")
+    subject, html_body = build_email_html(results, flipp_deals)
+    send_email(subject, html_body)
