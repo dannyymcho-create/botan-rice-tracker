@@ -1,0 +1,31 @@
+name: Daily Botan Rice Price Alert
+
+on:
+  schedule:
+    - cron: '0 13 * * *' # 매일 아침 8시 (동부 표준시 EST 기준)
+  workflow_dispatch:
+
+jobs:
+  check-price-and-email:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright==1.48.0
+          playwright install --with-deps chromium
+
+      - name: Check prices and send email
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          POSTAL_CODE: ${{ secrets.POSTAL_CODE || 'M5V2T6' }}
+        run: python check_prices.py
